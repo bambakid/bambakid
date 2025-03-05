@@ -1,0 +1,611 @@
+---
+title: "CT_16S"
+author: "Ted Bambakidis"
+date: "2022-10-14"
+output: html_document
+---
+# load packages
+```{r}
+library(BiocManager)
+library(phyloseq)
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(vegan)
+require(RColorBrewer)
+library(tidyr)
+library(grDevices)
+library(scales)
+library(devtools)
+library(ggfortify)
+library(tibble)
+library(rbiom)
+library(ape)
+
+```
+
+# load in OTU table, taxonomy file, and phylogenetic tree from qiime2. Build into single phyloseq object
+```{r}
+OTU_table = read.csv("/Users/ted/Library/CloudStorage/GoogleDrive-bambakit@oregonstate.edu/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/v1_160_140_97/miseq393_table_97.csv", row.names = 1)
+OTUt_2<-as.data.frame(t(OTU_table))
+OTUt_3_0<-OTUt_2[rowSums(OTUt_2[,-33569],na.rm=TRUE)>0,] # 342 obs x 33568 taxa
+
+tax<-read.csv("/Users/ted/Library/CloudStorage/GoogleDrive-bambakit@oregonstate.edu/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/v1_160_140_97/miseq393_rep-seqs_97_taxonomy_silva138_fixed.csv")
+otu_ids<-data.frame(OTU_ID=names(OTUt_3_0))
+otu_taxed<-merge(otu_ids,tax,by="OTU_ID")
+otu_taxed2<-subset(otu_taxed,Domain!="Chloroplast" & Phylum!="Chloroplast" & Class!="Chloroplast" & Order!="Chloroplast" & Family!="Chloroplast" & Family!="Genus" & Family!="Species" & Domain!="Mitochondria" & Phylum!="Mitochondria" & Class!="Mitochondria" & Order!="Mitochondria" & Family!="Mitochondria" & Genus!="Mitochondria" & Species!="Mitochondria") # 31709 x 8 vars
+
+OTUt_3_1<-OTUt_3_0[,names(OTUt_3_0) %in% otu_taxed2$OTU_ID]
+OTUt_3<-OTUt_3_1[,colSums(OTUt_3_1)>50] # 342 x 5586
+
+
+meta0<-read.csv("/Users/ted/Library/CloudStorage/GoogleDrive-bambakit@oregonstate.edu/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/ctdna_alldata_final.csv")
+
+ws<-read.csv("/Users/ted/Library/CloudStorage/GoogleDrive-bambakit@oregonstate.edu/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/ct_macro_watersheds.csv")
+ws_2 <- read.csv("/Users/ted/Library/CloudStorage/GoogleDrive-bambakit@oregonstate.edu/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/CT_River_MS_Sites_Latitude_Longitude_v2.csv")
+ws_2$Site_ID<-ws_2$Site_Name
+
+meta00<-merge(meta0,ws,by="Site_ID",all.x=TRUE) # all.x=TRUE get n=365; all.x=FALSE get n=335
+meta<-merge(meta00,ws_2[,c("Site_ID","State", "dec_lat", "subwatershed", "subwatershed2")],by="Site_ID",all.x=TRUE) # 365 obs x 90 var when all.x=TRUE
+
+
+meta$ws_km2<-meta$drainage_area_km2
+
+meta$log10_NPOC<-log10(1+meta$NPOC)
+meta$log10_TDN<-log10(1+meta$TDN)
+meta$log10_tempK<-log10(meta$Temp_deg_C+273.15)
+meta$pH_units[meta$pH_units>14|meta$pH_units<2]<-NA
+meta$log10_pH_units<-log10(meta$pH_units)
+meta$log10_ws_km2<-log10(meta$Drainage.Area..km2.)
+meta$log10_q_cms<-log10(1+meta$q_cms)
+meta$log10_res_day<-log10(meta$res_day)
+meta$log10_HDO_Sat <- log10(meta$HDO__Sat)
+meta$log10_Turb_NTU <- log10(meta$TurbDig_NTU+0.01)
+meta$log10_dec_lat <- log10(meta$dec_lat)
+
+meta$total_fl<-meta$Fmax1+meta$Fmax2+meta$Fmax3+meta$Fmax4+meta$Fmax5+meta$Fmax6
+meta$log10_per_c1<-log10((meta$Fmax1+0.01/meta$total_fl)*100)
+meta$log10_per_c2<-log10((meta$Fmax2+0.01/meta$total_fl)*100)
+meta$log10_per_c3<-log10((meta$Fmax3+0.01/meta$total_fl)*100)
+meta$log10_per_c4<-log10((meta$Fmax4+0.01/meta$total_fl)*100)
+meta$log10_per_c5<-log10((meta$Fmax5+0.01/meta$total_fl)*100)
+meta$log10_per_c6<-log10((meta$Fmax6+0.01/meta$total_fl)*100)
+
+# other relative abundance method for PARAFAC
+meta$fmax_total<-meta$Fmax1+meta$Fmax2+meta$Fmax3+meta$Fmax4+meta$Fmax5+meta$Fmax6
+meta$per_fmax1<-meta$Fmax1/meta$fmax_total
+meta$per_fmax2<-meta$Fmax2/meta$fmax_total
+meta$per_fmax3<-meta$Fmax3/meta$fmax_total
+meta$per_fmax4<-meta$Fmax4/meta$fmax_total
+meta$per_fmax5<-meta$Fmax5/meta$fmax_total
+meta$per_fmax6<-meta$Fmax6/meta$fmax_total
+
+#allochthonous perfmax
+meta$per_fmax_allo<-(meta$Fmax1+meta$Fmax3+meta$Fmax4)/meta$fmax_total
+#autochthonous perfmax
+meta$per_fmax_auto<-(meta$Fmax2+meta$Fmax5+meta$Fmax6)/meta$fmax_total
+
+meta2<-subset(meta, !is.na(log10_NPOC)& !is.na(log10_ws_km2) & !is.na(log10_res_day) & !is.na(log10_HDO_Sat) & !is.na(per_fmax1) & !is.na(per_fmax2) & !is.na(per_fmax3) & !is.na(per_fmax4) & !is.na(per_fmax5) & !is.na(per_fmax6) & !is.na(per_fmax_allo) & !is.na(per_fmax_auto)) # n=242
+
+meta_comp<-meta2[complete.cases(meta2[,c("log10_NPOC","log10_TDN","SpCond_uS_cm","log10_HDO_Sat","log10_Turb_NTU","log10_tempC","log10_pH_units","log10_ws_km2","log10_q_cms","log10_res_day", "per_fmax1", "per_fmax2", "per_fmax3", "per_fmax4", "per_fmax5", "per_fmax6", "per_fmax_allo", "per_fmax_auto")]),] # n=162
+
+OTUt_2bb<-OTUt_3
+
+OTUt_2bb$sample.number<-row.names(OTUt_2bb)
+
+OTUt_2bb$sample.number<-gsub(".","_",OTUt_2bb$sample.number,fixed=TRUE)
+
+end<-ncol(OTUt_2bb)-1
+names(OTUt_2bb)[1:end]<-paste("ID_",names(OTUt_2bb)[1:end],sep="")
+
+meta_otu<-merge(meta_comp,OTUt_2bb,by="sample.number",all.x=TRUE) # n=152
+
+env_col<-ncol(meta_comp)
+otu_col<-ncol(OTUt_2bb)
+otu_start<-env_col+1
+otu_end<-ncol(meta_otu)
+
+
+meta_otu2<-subset(meta_otu,!is.na(ID_e82db957b7d3648e59c22f85eee451cb))
+meta_otu2<-meta_otu2[rowSums(meta_otu2[,c(otu_start:otu_end)])>10,]
+
+meta_otu_wc<-subset(meta_otu2[-262,],Sample.Type=="DNA WC") # n=96
+meta_otu_bf<-subset(meta_otu2[-262,],Sample.Type=="DNA BF")# n=56
+
+otu_end<-ncol(meta_otu_wc)
+otu_wc_keep<-meta_otu_wc[,c(otu_start:otu_end)]
+```
+
+# co-inertia - water column
+```{r}
+meta_isme <- meta_otu_wc[,1:117] # n=96
+
+#rename important variables
+meta_isme$NPOC <- meta_isme$log10_NPOC
+meta_isme$TDN <- meta_isme$log10_TDN
+meta_isme$conductivity <- meta_isme$SpCond_uS_cm
+meta_isme$oxygen_sat <- meta_isme$log10_HDO_Sat
+meta_isme$turbidity <- meta_isme$log10_Turb_NTU
+meta_isme$temperature <- meta_isme$Temp_deg_C
+meta_isme$pH <- meta_isme$log10_pH_units
+meta_isme$travel_time <- meta_isme$log10_res_day
+meta_isme$allochthonous <- meta_isme$per_fmax_allo
+meta_isme$autochthonous <- meta_isme$per_fmax_auto
+
+
+meta_wc_keep_isme<-meta_isme[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","travel_time", "allochthonous", "autochthonous")] # n=96
+
+
+# use alt metadata set for env PCA
+env_pca_we_wc_isme<-dudi.pca(d = meta_wc_keep_isme,row.w=otu_coa_wc$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme <- coinertia(env_pca_we_wc_isme,otu_coa_wc, scan = FALSE, nf = 5)
+
+#export otu_coa coordinates
+otu_coa_wc_li <- as.data.frame(otu_coa_wc$li)
+# write out for mRF
+saveRDS(otu_coa_wc_li, file = "/Volumes/GoogleDrive/My Drive/CT_16S/R/multivariate_randomforest/otu_coa_wc_li.RDS")
+# export matched metadata table
+saveRDS(meta_wc_keep_sam_short, file = "/Volumes/GoogleDrive/My Drive/CT_16S/R/multivariate_randomforest/meta_wc_keep_sam_short.RDS")
+
+
+enviro_loadings_noDOM_isme<-as.data.frame(coin2_noDOM_isme$co)
+enviro_loadings_noDOM_isme$variable<-row.names(enviro_loadings_noDOM_isme)
+
+site_scores_coi_isme_0<-as.data.frame(coin2_noDOM_isme$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme<-bind_cols(site_scores_coi_isme_0,meta_isme)
+
+write.csv(enviro_loadings_noDOM_isme, file="/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/enviro_loadings_noDOM_isme_v2.csv")
+
+library(ggrepel)
+set.seed=42
+pdf("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_wc_noDOM_isme_sites_temp.pdf")
+ggplot()+
+geom_text(data=site_scores_coi_isme,aes(NorS1,NorS2,label=Site_ID, color=temperature),size=3)+
+  scale_y_reverse()+
+  scale_color_gradient(low="blue", high="green")+
+    #scale_color_gradient(colors=c("darkred", "orange", "yellow"))+
+#geom_segment(data=top_otu,aes(x = 0, y = 0, xend = Axis1, yend = Axis2),arrow = arrow(length = unit(0.5, "cm")),color="black", size=1.2)+
+#geom_text(data=top_otu,aes(Axis1,Axis2,label=otu), vjust = "inward", hjust = "inward")+
+geom_segment(data=enviro_loadings_noDOM_isme,aes(x = 0, y = 0, xend = Comp1*5, yend = Comp2*5), arrow = arrow(length = unit(0.5, "cm")),color="red", size=0.75)+
+geom_text_repel(data=enviro_loadings_noDOM_isme,aes(Comp1*5,Comp2*5,label=variable),force=2,min.segment.length=Inf,color="red", size=4)+
+xlab("55.0% Projected Inertia")+
+ylab("15.87% Projected Intertia")
+# original code: geom_text(data=enviro_loadings_noDOM_alt,aes(Comp1*5,Comp2*5,label=variable), vjust = "inward", hjust = "inward",color="red", size=4)+
+
+## dark plot; this code used to generate with or without allo/auto
+library(ggdark)
+library(svglite)
+pdf("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_wc_noDOM_isme_sites_TT_27Nov_oob.pdf", width=9, height=8)
+#svglite("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_wc_noDOM_isme_sites_TT_27Nov.svg", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme,aes(NorS1,NorS2,label=Site_ID, color=travel_time), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  #scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  scale_color_gradient(low="blue", high = "green",
+                       limits=c(-1.32,1.2), oob=scales::squish)+
+  scale_y_reverse()+
+  theme_classic()+
+  #dark_mode()+
+  geom_segment(data=enviro_loadings_noDOM_isme, aes(x=0, y=0,xend=Comp1*4, yend=Comp2*4), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme, aes(Comp1*4, Comp2*4, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("23.3% Projected Inertia")+ # inertia is computed as % inertia from output multiplied by RV value
+  ylab("5.2% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, WC_27Nov, allo/auto  RV=0.40, Tot Inertia=28.5%")
+dev.off()
+```
+
+# co-inertia - biofilms
+```{r}
+meta_isme_bf <- meta_otu_bf[,1:110]  # was n=47 without PHEL;  n=56 with PHEL
+
+#rename important variables
+meta_isme_bf$NPOC <- meta_isme_bf$log10_NPOC
+meta_isme_bf$TDN <- meta_isme_bf$log10_TDN
+meta_isme_bf$conductivity <- meta_isme_bf$SpCond_uS_cm
+meta_isme_bf$oxygen_sat <- meta_isme_bf$log10_HDO_Sat
+meta_isme_bf$turbidity <- meta_isme_bf$log10_Turb_NTU
+meta_isme_bf$temperature <- meta_isme_bf$Temp_deg_C
+meta_isme_bf$pH <- meta_isme_bf$log10_pH_units
+meta_isme_bf$travel_time <- meta_isme_bf$log10_res_day
+meta_isme_bf$allochthonous <- meta_isme_bf$per_fmax_allo
+meta_isme_bf$autochthonous <- meta_isme_bf$per_fmax_auto
+
+
+meta_bf_keep_isme<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","travel_time", "allochthonous", "autochthonous")]
+
+
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme<-dudi.pca(d = meta_bf_keep_isme,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_bf <- coinertia(env_pca_we_bf_isme,otu_coa_bf, scan = FALSE, nf = 5)
+
+#export otu_coa coordinates
+otu_coa_bf_li <- as.data.frame(otu_coa_bf$li)
+# write out for mRF
+saveRDS(otu_coa_bf_li, file = "/Volumes/GoogleDrive/My Drive/CT_16S/R/multivariate_randomforest/otu_coa_bf_li.RDS")
+# export matched metadata table
+saveRDS(meta_bf_keep_sam_short, file = "/Volumes/GoogleDrive/My Drive/CT_16S/R/multivariate_randomforest/meta_bf_keep_sam_short.RDS")
+
+
+enviro_loadings_noDOM_isme_bf<-as.data.frame(coin2_noDOM_isme_bf$co)
+enviro_loadings_noDOM_isme_bf$variable<-row.names(enviro_loadings_noDOM_isme_bf)
+
+site_scores_coi_isme_bf_0<-as.data.frame(coin2_noDOM_isme_bf$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme_bf<-bind_cols(site_scores_coi_isme_bf_0,meta_isme_bf)
+
+write.csv(enviro_loadings_noDOM_isme_bf, file="/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr//enviro_loadings_noDOM_isme_bf_v2.csv")
+
+## dark plot; this code used to generate with or without allo/auto
+library(ggdark)
+library(svglite)
+#png("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin_bfc_noDOM_isme_sites_tt_27Dec.png")
+svglite("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_tt_27Nov.svg", width=9, height=8)
+#pdf("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_tt_27Nov.pdf", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme_bf,aes(NorS1,NorS2,label=Site_ID, color=travel_time), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  #scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  scale_color_gradient(low="blue", high = "green",
+                       limits=c(-1.32,1.2))+
+  #scale_y_reverse()+
+  #dark_mode()+
+  theme_classic()+
+  geom_segment(data=enviro_loadings_noDOM_isme_bf, aes(x=0, y=0,xend=Comp1*3, yend=Comp2*3), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme_bf, aes(Comp1*3, Comp2*3, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("20.6% Projected Inertia")+
+  ylab("5.3% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, BF, TT, 27Nov  RV=0.40, Tot Inertia=25.9%")
+dev.off()
+
+
+#____ testing dd, km2, discharge instead of TT
+meta_isme_bf[,'dend_dist_km'] <- NA
+
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'ASHU'] <- 1738
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'AMMO'] <- 409
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'BLAC'] <- 632
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'BUNN'] <- 18
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'CHIC'] <- 2331
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'COLD'] <- 370
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'DEER'] <- 2113
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'EBRA'] <- 255
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'FARM'] <- 2068
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'HUBB'] <- 64
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'MILL'] <- 1070
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'MOOS'] <- 286
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'NEPA'] <- 95
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'OTTA'] <- 888
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'PASS'] <- 1697
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'PHEL'] <- 13.5
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'POPE'] <- 16
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'SALM'] <- 374
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'SAXT'] <- 387
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'SLPR'] <- 158
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'STIL'] <- 296
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'SUGA'] <- 1060
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'THOM'] <- 35346
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'UAMM'] <- 558
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'UCON'] <- 679
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'UNIO'] <- 1290
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'W9'] <- 1.65
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'WHIT'] <- 2928
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'WILL'] <- 478
+meta_isme_bf$dend_dist_km[meta_isme_bf$Site_ID == 'WFLD'] <- 1511
+
+meta_isme_bf$dend_dist_km_log10 <- log10(meta_isme_bf$dend_dist_km)
+meta_isme_bf$dendritic_distance <- meta_isme_bf$dend_dist_km_log10
+
+#______dendritic distance
+meta_bf_keep_isme_dd<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","dendritic_distance", "allochthonous", "autochthonous")]
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme_dd<-dudi.pca(d = meta_bf_keep_isme_dd,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_bf_dd <- coinertia(env_pca_we_bf_isme_dd,otu_coa_bf, scan = FALSE, nf = 5)
+
+enviro_loadings_noDOM_isme_bf_dd<-as.data.frame(coin2_noDOM_isme_bf_dd$co)
+enviro_loadings_noDOM_isme_bf_dd$variable<-row.names(enviro_loadings_noDOM_isme_bf_dd)
+
+site_scores_coi_isme_bf_dd_0<-as.data.frame(coin2_noDOM_isme_bf_dd$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme_bf_dd<-bind_cols(site_scores_coi_isme_bf_dd_0,meta_isme_bf)
+
+
+library(svglite)
+#pdf("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_dd_27Dec.pdf", width=9, height=8)
+svglite("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_temp_dd_27Dec.svg", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme_bf_dd,aes(NorS1,NorS2,label=Site_ID, color=temperature), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  #scale_color_gradient(low="purple", high="orange")+
+  #scale_y_reverse()+
+  theme_classic()+
+  #dark_mode()+
+  geom_segment(data=enviro_loadings_noDOM_isme_bf_dd, aes(x=0, y=0,xend=Comp1*4, yend=Comp2*4), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme_bf_dd, aes(Comp1*4, Comp2*4, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("19.6% Projected Inertia")+
+  ylab("5.9% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, BF, dendritic_dist 27Dec  RV=0.42, Tot Inertia=25.5%")
+dev.off()
+
+
+#______q_cms
+
+meta_isme_bf$discharge <- meta_isme_bf$log10_q_cms
+
+meta_bf_keep_isme_q<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","discharge", "allochthonous", "autochthonous")]
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme_q<-dudi.pca(d = meta_bf_keep_isme_q,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_bf_q <- coinertia(env_pca_we_bf_isme_q,otu_coa_bf, scan = FALSE, nf = 5)
+
+enviro_loadings_noDOM_isme_bf_q<-as.data.frame(coin2_noDOM_isme_bf_q$co)
+enviro_loadings_noDOM_isme_bf_q$variable<-row.names(enviro_loadings_noDOM_isme_bf_q)
+
+site_scores_coi_isme_bf_q_0<-as.data.frame(coin2_noDOM_isme_bf_q$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme_bf_q<-bind_cols(site_scores_coi_isme_bf_q_0,meta_isme_bf)
+
+
+## dark plot; this code used to generate with or without allo/auto
+library(ggdark)
+library(svglite)
+pdf("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_temp_q_27Dec.pdf", width=9, height=8)
+#svglite("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_temp_q_27Dec.svg", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme_bf_q,aes(NorS1,NorS2,label=Site_ID, color=temperature), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  #scale_color_gradient(low="purple", high="orange")+
+  #scale_y_reverse()+
+  theme_classic()+
+  #dark_mode()+
+  geom_segment(data=enviro_loadings_noDOM_isme_bf_q, aes(x=0, y=0,xend=Comp1*4, yend=Comp2*4), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme_bf_q, aes(Comp1*4, Comp2*4, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("20.0% Projected Inertia")+
+  ylab("5.6% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, BF, discharge 27Dec RV=0.42, Tot Inertia=25.7%")
+dev.off()
+
+
+#______drainage_area
+
+meta_isme_bf$drainage_area <- meta_isme_bf$log10_ws_km2
+
+meta_bf_keep_isme_km2<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","drainage_area", "allochthonous", "autochthonous")]
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme_km2<-dudi.pca(d = meta_bf_keep_isme_km2,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_bf_km2 <- coinertia(env_pca_we_bf_isme_km2,otu_coa_bf, scan = FALSE, nf = 5)
+
+enviro_loadings_noDOM_isme_bf_km2<-as.data.frame(coin2_noDOM_isme_bf_km2$co)
+enviro_loadings_noDOM_isme_bf_km2$variable<-row.names(enviro_loadings_noDOM_isme_bf_km2)
+
+site_scores_coi_isme_bf_km2_0<-as.data.frame(coin2_noDOM_isme_bf_km2$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme_bf_km2<-bind_cols(site_scores_coi_isme_bf_km2_0,meta_isme_bf)
+
+
+library(svglite)
+pdf("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_temp_km2_27Dec.pdf", width=9, height=8)
+#svglite("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_temp_km2_27Dec.svg", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme_bf_km2,aes(NorS1,NorS2,label=Site_ID, color=temperature), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  #scale_color_gradient(low="purple", high="orange")+
+  #scale_y_reverse()+
+  theme_classic()+
+  #dark_mode()+
+  geom_segment(data=enviro_loadings_noDOM_isme_bf_km2, aes(x=0, y=0,xend=Comp1*4, yend=Comp2*4), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme_bf_km2, aes(Comp1*4, Comp2*4, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("19.6% Projected Inertia")+
+  ylab("6.0% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, BF, drainarea 27Dec RV=0.42, Tot Inertia=25.6%")
+dev.off()
+#
+meta_bf_keep_isme<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","travel_time", "allochthonous", "autochthonous")]
+
+
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme<-dudi.pca(d = meta_bf_keep_isme,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_bf <- coinertia(env_pca_we_bf_isme,otu_coa_bf, scan = FALSE, nf = 5)
+
+#export otu_coa coordinates
+otu_coa_bf_li <- as.data.frame(otu_coa_bf$li)
+
+
+#________hydro model with all hydro variables, per reviewer request_BF________________
+
+meta_bf_keep_isme_hydro<-meta_isme_bf[,c("NPOC","TDN","conductivity","oxygen_sat","turbidity","temperature","pH","travel_time", "drainage_area", "discharge", "dendritic_distance", "allochthonous", "autochthonous")]
+
+# use alt metadata set for env PCA
+env_pca_we_bf_isme_hydro<-dudi.pca(d = meta_bf_keep_isme_hydro,row.w=otu_coa_bf$lw,scale = TRUE, scannf = FALSE, nf = 10)
+#now run co-inertia for these
+coin2_noDOM_isme_hydro_bf <- coinertia(env_pca_we_bf_isme_hydro,otu_coa_bf, scan = FALSE, nf = 5)
+
+enviro_loadings_noDOM_isme_hydro_bf<-as.data.frame(coin2_noDOM_isme_hydro_bf$co)
+enviro_loadings_noDOM_isme_hydro_bf$variable<-row.names(enviro_loadings_noDOM_isme_hydro_bf)
+
+site_scores_coi_isme_hydro_bf_0<-as.data.frame(coin2_noDOM_isme_hydro_bf$mX)
+#site_scores_coi<-bind_cols(site_scores_coi_0,meta_wc_keep)
+site_scores_coi_isme_hydro_bf<-bind_cols(site_scores_coi_isme_hydro_bf_0,meta_isme_bf)
+
+library(ggdark)
+library(svglite)
+library(ggrepel)
+pdf("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_hydro_11Nov2023.pdf", width=9, height=8)
+#svglite("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/coin2_bf_noDOM_isme_sites_hydro_11Nov2023.svg", width=9, height=8)
+ggplot()+ 
+  geom_text(data=site_scores_coi_isme_hydro_bf,aes(NorS1,NorS2,label=Site_ID, color=travel_time), size=4, fontface="bold")+
+  #scale_color_manual(values = season_2colors)+
+  #scale_color_manual(values =  c("#00FFFF"))+
+  #scale_color_continuous(low = "yellow", high = "red")+
+  #scale_color_continuous(low = "blue", high = "green")+
+  scale_color_gradient(low="blue", high = "green",
+                       limits=c(-1.32,1.2))+
+  #scale_y_reverse()+
+  theme_classic()+
+  #dark_mode()+
+  geom_segment(data=enviro_loadings_noDOM_isme_hydro_bf, aes(x=0, y=0,xend=Comp1*4, yend=Comp2*4), arrow=arrow(length=unit(0.5, "cm")), color="black", size=0.75)+
+  #geom_text(data=enviro_loadings_hydrochem, aes(Comp1*5,Comp2*5, label=variable), vjust = "inward", hjust = "inward", color="red")+
+  geom_text_repel(data=enviro_loadings_noDOM_isme_hydro_bf, aes(Comp1*4, Comp2*4, label=variable), force=2, min.segment.length=Inf, color="black", size=5)+
+  xlab("17.8% Projected Inertia")+ # computed as % projected inertia x RV value
+  ylab("9.6% Projected Inertia")+
+  ggtitle("CT co-inertia w/CA, BF, all hydro, RV=0.4132, Tot Inertia=27.4%")
+dev.off()
+
+
+#________PCoA________
+# Calculate bray-curtis distances with vegan
+otu_bf_braydist <- vegdist(otu_bf_keep_noDOM, "bray")
+
+otu_bf_isme_pcoa<-capscale(otu_bf_braydist~1,distance="bray")
+
+#x.bc.coast_sum <- as.data.frame(scores(otu_braydist_coast_sum_pcoa, display = "sites"))
+#nasqan_meta_coast_sum$bc.MDS1 <- x.bc.coast_sum$MDS1
+#nasqan_meta_coast_sum$bc.MDS2 <- x.bc.coast_sum$MDS2
+
+#bc.coast.sum.MDS_dim_1_ve<-round(otu_braydist_coast_sum_pcoa$CA$eig,digits=1)[1]
+#bc.coast.sum.MDS_dim_2_ve<-round(otu_braydist_coast_sum_pcoa$CA$eig,digits=1)[2]
+
+x.bf.bc.isme.pcoa <- as.data.frame(scores(otu_bf_isme_pcoa, display = "sites"))
+meta_bf_isme_pcoa <- meta_isme_bf # copy metadata file
+meta_bf_isme_pcoa$bc.MDS1 <- x.bf.bc.isme.pcoa$MDS1
+meta_bf_isme_pcoa$bc.MDS2 <- x.bf.bc.isme.pcoa$MDS2
+
+#bc.wc.pcoa.MDS_dim_1_ve <- round(otu_wc_keep_pcoa$CA$eig,digits=1)[1]
+#bc.wc.pcoa.MDS_dim_2_ve <- round(otu_wc_keep_pcoa$CA$eig,digits=1)[2]
+
+library(ggdark)
+#pdf("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/pcoa_bf_noDOM_alt_sites_TT_27Nov.pdf", width=9, height=8)
+svglite("/Volumes/GoogleDrive/.shortcut-targets-by-id/1MrtyMJBQfLZ0-ExR_vnU4E2jc_e1r9R5/CT_16S/R/coi_corr/pcoa_bf_noDOM_alt_sites_TT_27Nov.svg", width=9, height=8)
+#png("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/pcoa_bf_noDOM_alt_sites_temp.png")
+ggplot()+
+  geom_text(data=meta_bf_isme_pcoa, aes(bc.MDS1, bc.MDS2, label=Site_ID, color=travel_time), size=4, fontface="bold")+
+  #dark_mode()+
+  theme_classic()+
+  #theme(panel.background = element_rect(fill = "#36454F", color = "black"))+
+  #theme(plot.background = element_rect(fill = "black", color = "black"))+ 
+  #theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  #theme_classic()+
+  #scale_color_manual(values = "#FF00FF")+
+  #scale_color_continuous(low = "yellow", high = "red")+
+  scale_color_gradient(low="blue", high = "green",
+                       limits=c(-1.32,1.2))+
+  #theme_hc(bgcolor = "darkunica")+
+  #theme_solarized_2(light = FALSE)+
+  #geom_hline(yintercept = 0, linetype="dotted") + 
+  #geom_vline(xintercept = 0, linetype="dotted") +
+  #scale_x_reverse()+
+  #scale_y_reverse()+
+  #geom_segment(data=factor_loadings, aes(x = 0.0, y =0.0,xend = CAP1 , yend = CAP2), arrow =arrow()) +
+  #geom_text(data=factor_loadings,aes(x=CAP1,y=CAP2,label=variable)) +
+  xlab("13.1% variance explained")+
+  ylab("8.1% variance explained")+
+  ggtitle("PCoA BF via Bray-Curtis 27Nov")
+```
+
+
+# PCoA
+```{r}
+# above we made an OTU table called otu_wc_keep
+
+# Calculate bray-curtis distances with vegan
+otu_braydist_wc <- vegdist(otu_wc_keep, "bray") # OTU is rows=samples, columnns=OTUs
+
+otu_braydist_wc_pcoa<-capscale(otu_braydist_wc~1,distance="bray")
+
+x.bc.wc <- as.data.frame(scores(otu_braydist_wc_pcoa, display = "sites"))
+meta_otu_wc$bc.MDS1 <- x.bc.wc$MDS1
+meta_otu_wc$bc.MDS2 <- x.bc.wc$MDS2
+
+bc.wc.MDS_dim_1_ve<-round(otu_braydist_wc_pcoa$CA$eig,digits=1)[1]
+bc.wc.MDS_dim_2_ve<-round(otu_braydist_wc_pcoa$CA$eig,digits=1)[2]
+
+#season_4colors <- c("winter" = "#00FFFF", "spring" = "#00FF00", "summer" = "#FF00FF", "autumn" = "#FFFF00")
+
+svglite("/Volumes/GoogleDrive/My Drive/CT_16S/R/coi_corr/plot_otu_bc_CT_temp.svg")
+#pdf("output/new_seasons_tt/plot_otu_wuni_4seas_rivername.pdf")
+ggplot()+
+  geom_text(data=meta_otu_wc, aes(bc.MDS1, bc.MDS2, label=Site_ID, color=Temp_deg_C), key_glyph="point", size=2, fontface="bold")+
+  theme_classic()+
+  #scale_color_manual(values = season_4colors)+
+  dark_mode()+
+  #theme(panel.background = element_rect(fill = "white", color = "white"))+ # charcoal = #36454F
+  #theme(plot.background = element_rect(fill = "#36454F", color = "black"))+ 
+  #theme(legend.background = element_rect(fill="#36454F"))+
+  #theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  #theme_classic()+
+  #scale_color_manual(values = "#FF00FF")+
+  scale_color_gradient(low="yellow", high="red")+
+  #theme_hc(bgcolor = "darkunica")+
+  #theme_solarized_2(light = FALSE)+
+  #geom_hline(yintercept = 0, linetype="dotted") + 
+  #geom_vline(xintercept = 0, linetype="dotted") +
+  #scale_x_reverse()+
+  scale_y_reverse()+
+  #geom_segment(data=factor_loadings, aes(x = 0.0, y =0.0,xend = CAP1 , yend = CAP2), arrow =arrow()) +
+  #geom_text(data=factor_loadings,aes(x=CAP1,y=CAP2,label=variable)) +
+  xlab(paste("PCO-1 (",bc.wc.MDS_dim_1_ve,"% Variance Explained)",sep="")) +
+  ylab(paste("PCO-2 (",bc.wc.MDS_dim_2_ve,"% Variance Explained)",sep="")) +
+  ggtitle("PCoA via Bray-Curtis CT WC by temp")
+dev.off()
+
+
+# alt wunifrac
+library(rbiom)
+otu_wc_keep_t <- t(otu_wc_keep)
+otu_wc_keep_t <- as.matrix(otu_wc_keep_t)
+otu_bc_wuni <- beta.div(otu_wc_keep_t, "unifrac", weighted = TRUE, tree=tree)
+
+pcoa.coast.wu <- pcoa(OTU_coast_wuni, correction="none", rn=NULL)
+pcoa.coast.wu.comp <- pcoa.coast.wu$vectors
+
+pcoa.coast.wu.1 <- -1*pcoa.coast.wu.comp[,1]
+pcoa.coast.wu.2 <- -2*pcoa.coast.wu.comp[,2]
+
+nasqan_meta_coast$pcoa.coast.wu.1 <- as.numeric(pcoa.coast.wu.1)
+nasqan_meta_coast$pcoa.coast.wu.2 <- as.numeric(pcoa.coast.wu.2)
+                                                      
+svglite("output/new_seasons_tt/plot_otu_wuni_4seas_rivername.svg")
+#pdf("output/new_seasons_tt/plot_otu_wuni_4seas_rivername.pdf")
+ggplot()+
+  geom_text(data=nasqan_meta_coast, aes(pcoa.coast.wu.1, pcoa.coast.wu.2, label=river, color=kmeans_seasons), key_glyph="point", size=2, fontface="bold")+
+  theme_classic()+
+  scale_color_manual(values = season_4colors)+
+  dark_mode()+
+  scale_x_reverse()+
+  scale_y_reverse()+
+  #geom_segment(data=factor_loadings, aes(x = 0.0, y =0.0,xend = CAP1 , yend = CAP2), arrow =arrow()) +
+  #geom_text(data=factor_loadings,aes(x=CAP1,y=CAP2,label=variable)) +
+  xlab(paste("PCoA-1 (",round(pcoa.coast.wu$values$Relative_eig,digits=3)[1]*100,"% variance explained)",sep="")) +
+  ylab(paste("PCoA-2,(",round(pcoa.coast.wu$values$Relative_eig,digits=3)[2]*100,"% variance explained)",sep="")) +
+  ggtitle("PCoA via Wuni 4 Seasons")
+dev.off()
+```
+
