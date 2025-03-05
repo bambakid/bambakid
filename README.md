@@ -1,5 +1,5 @@
 Thanks for checking out @bambakid. <br>
-Here I'll house scripts for bioinformatics and data analysis scripts used in my research.
+Here I'll house scripts for bioinformatics and data analysis used in my research.
 <br>
 
 <hr>
